@@ -13,7 +13,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 1056116070  # ТВОЙ Telegram ID
 
 bot = Bot(token=os.getenv("BOT_TOKEN"))
-dp = Dispatcher()
+dp = Dispatcher(bot)
 
 # Файлы для хранения данных
 USERS_FILE = "users.json"
