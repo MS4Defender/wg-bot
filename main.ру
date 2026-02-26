@@ -9,10 +9,10 @@ from aiogram.filters import CommandStart
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from datetime import datetime, timedelta
 
-TOKEN = "8366390176:AAEQYj53bEaXLtyq6QcYE_QJEObSTul-qW0"
+TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 1056116070  # ТВОЙ Telegram ID
 
-bot = Bot(token=TOKEN)
+bot = Bot(token=os.getenv("BOT_TOKEN"))
 dp = Dispatcher()
 
 # Файлы для хранения данных
