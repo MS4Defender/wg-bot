@@ -3,600 +3,439 @@ import json
 import os
 import random
 import string
-from aiogram import Bot, Dispatcher
-from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
+import logging
 from datetime import datetime, timedelta
 
-TOKEN = os.getenv("BOT_TOKEN")
-OWNER_ID = 1056116070  # ТВОЙ Telegram ID
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import (
+    Message,
+    CallbackQuery,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+)
+from aiogram.filters import CommandStart
 
-bot = Bot(token=os.getenv("BOT_TOKEN"))
+# -------------------- CONFIG --------------------
+logging.basicConfig(level=logging.INFO)
+
+TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = 1056116070  # твой Telegram ID
+
+if not TOKEN:
+    raise RuntimeError("❌ Переменная окружения BOT_TOKEN не установлена в Railway Variables")
+
+bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# Файлы для хранения данных
+# -------------------- STORAGE --------------------
 USERS_FILE = "users.json"
 PROMOCODES_FILE = "promocodes.json"
 ADMINS_FILE = "admins.json"
 
-
-# Загружаем данные
 def load_data(filename, default):
-    if os.path.exists(filename):
-        with open(filename, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
-
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return default
+    return default
 
 def save_data(filename, data):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
+users = load_data(USERS_FILE, {})           # { "user_id": {"balance": int, "last_luck": str|None} }
+promocodes = load_data(PROMOCODES_FILE, {}) # { "CODE": {"value": int, "uses": int, "max_uses": int, "created_by": int} }
+admins = load_data(ADMINS_FILE, [OWNER_ID]) # [int, int, ...]
 
-# Данные пользователей
-users = load_data(USERS_FILE, {})
+admin_states = {}  # { admin_id(int): "state_string" }
 
-# Промокоды
-promocodes = load_data(PROMOCODES_FILE, {})
+def ensure_user(user_id: str):
+    if user_id not in users:
+        users[user_id] = {"balance": 0, "last_luck": None}
+        save_data(USERS_FILE, users)
 
-# Администраторы
-admins = load_data(ADMINS_FILE, [OWNER_ID])
+def is_admin(user_id: int) -> bool:
+    return user_id in admins
 
-# Состояния для админов
-admin_states = {}
-
-
-def is_admin(user_id):
-    return user_id in admins
-
-
-def is_owner(user_id):
-    return user_id == OWNER_ID
-
+def is_owner(user_id: int) -> bool:
+    return user_id == OWNER_ID
 
 def generate_promo_code(length=6):
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
+    return "".join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
+def main_keyboard(for_user_id: int) -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎮 Мини-игра", callback_data="game")],
+        [InlineKeyboardButton(text="🛒 Магазин", callback_data="shop")],
+        [InlineKeyboardButton(text="🎁 Удача", callback_data="luck")],
+        [InlineKeyboardButton(text="📜 Правила", callback_data="rules")],
+        [InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")],
+    ])
+    if is_admin(for_user_id):
+        kb.inline_keyboard.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin")])
+    return kb
 
+# -------------------- START --------------------
 @dp.message(CommandStart())
 async def start(message: Message):
-    user_id = str(message.from_user.id)
-    if user_id not in users:
-        users[user_id] = {"balance": 0, "last_luck": None}
-        save_data(USERS_FILE, users)
+    user_id = str(message.from_user.id)
+    ensure_user(user_id)
 
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 Мини-игра", callback_data="game")],
-        [InlineKeyboardButton(text="🛒 Магазин", callback_data="shop")],
-        [InlineKeyboardButton(text="🎁 Удача", callback_data="luck")],
-        [InlineKeyboardButton(text="📜 Правила", callback_data="rules")],
-        [InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")]
-    ])
+    await message.answer(
+        "🏹 Добро пожаловать на турнир WG!\n\n"
+        f"💰 Твой баланс: {users[user_id]['balance']} монет\n\n"
+        "Ивент уже запущен.\n"
+        "Готов испытать удачу?",
+        reply_markup=main_keyboard(message.from_user.id),
+    )
 
-    if is_admin(int(user_id)):
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin")])
-
-    await message.answer(
-        "🏹 Добро пожаловать на турнир WG!\n\n"
-        f"💰 Твой баланс: {users[user_id]['balance']} монет\n\n"
-        "Ивент уже запущен.\n"
-        "Готов испытать удачу?",
-        reply_markup=keyboard
-    )
-
-
-@dp.callback_query(lambda c: c.data == "luck")
+# -------------------- LUCK --------------------
+@dp.callback_query(F.data == "luck")
 async def process_luck(callback: CallbackQuery):
-    luck_keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🎲 Удача")]],
-        resize_keyboard=True,
-        one_time_keyboard=False
-    )
+    luck_kb = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🎲 Удача")]],
+        resize_keyboard=True,
+        one_time_keyboard=False,
+    )
+    await callback.message.answer(
+        "👇 Нажми на большую кнопку, чтобы испытать удачу!\n"
+        "Доступно **1 раз в 24 часа**",
+        reply_markup=luck_kb,
+        parse_mode="Markdown",
+    )
+    await callback.answer()
 
-    await callback.message.answer(
-        "👇 Нажми на большую кнопку, чтобы испытать удачу!\n"
-        "Доступно **1 раз в 24 часа**",
-        reply_markup=luck_keyboard
-    )
-    await callback.answer()
-
-
-@dp.message(lambda message: message.text == "🎲 Удача")
+@dp.message(F.text == "🎲 Удача")
 async def give_luck(message: Message):
-    user_id = str(message.from_user.id)
-    now = datetime.now()
+    user_id = str(message.from_user.id)
+    ensure_user(user_id)
 
-    if users[user_id]["last_luck"]:
-        last_used = datetime.fromisoformat(users[user_id]["last_luck"])
-        time_diff = now - last_used
+    now = datetime.now()
+    last = users[user_id].get("last_luck")
 
-        if time_diff < timedelta(hours=24):
-            remaining = timedelta(hours=24) - time_diff
-            hours = remaining.seconds // 3600
-            minutes = (remaining.seconds % 3600) // 60
+    if last:
+        try:
+            last_used = datetime.fromisoformat(last)
+            time_diff = now - last_used
+            if time_diff < timedelta(hours=24):
+                remaining = timedelta(hours=24) - time_diff
+                hours = remaining.seconds // 3600
+                minutes = (remaining.seconds % 3600) // 60
+                await message.answer(f"⏳ Подожди ещё {hours} ч {minutes} мин до следующей попытки!")
+                return
+        except Exception:
+            # если формат сломался — разрешаем и перезапишем
+            pass
 
-            await message.answer(
-                f"⏳ Подожди ещё {hours} ч {minutes} мин до следующей попытки!"
-            )
-            return
+    coins = random.randint(0, 1000)
+    users[user_id]["balance"] += coins
+    users[user_id]["last_luck"] = now.isoformat()
+    save_data(USERS_FILE, users)
 
-    coins = random.randint(0, 1000)
-    users[user_id]["balance"] += coins
-    users[user_id]["last_luck"] = now.isoformat()
-    save_data(USERS_FILE, users)
+    await message.answer(
+        f"🎲 Тебе выпало: {coins} монет!\n"
+        f"💰 Текущий баланс: {users[user_id]['balance']}"
+    )
 
-    await message.answer(
-        f"🎲 Тебе выпало: {coins} монет!\n"
-        f"💰 Текущий баланс: {users[user_id]['balance']}"
-    )
-
-
-@dp.callback_query(lambda c: c.data == "promo")
+# -------------------- PROMO --------------------
+@dp.callback_query(F.data == "promo")
 async def promo_button(callback: CallbackQuery):
-    await callback.message.answer(
-        "🎟 Введи промокод в чат:\n"
-        "Например: ABC123"
-    )
-    await callback.answer()
+    await callback.message.answer("🎟 Введи промокод в чат:\nНапример: ABC123")
+    await callback.answer()
 
-
-@dp.callback_query(lambda c: c.data == "admin")
-async def admin_panel(callback: CallbackQuery):
-    user_id = callback.from_user.id
-    if not is_admin(user_id):
-        await callback.answer("❌ У тебя нет прав администратора!", show_alert=True)
-        return
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎟 Создать промокод", callback_data="admin_create_promo")],
-        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="admin_list_promos")],
-        [InlineKeyboardButton(text="💰 Начислить монеты", callback_data="admin_give")],
-        [InlineKeyboardButton(text="👥 Список админов", callback_data="admin_list")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")]
-    ])
-
-    if is_owner(user_id):
-        keyboard.inline_keyboard.insert(0, [
-            InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add"),
-            InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove")
-        ])
-
-    await callback.message.edit_text(
-        "⚙️ Админ-панель\n\n"
-        "Выбери действие:",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_add")
-async def add_admin_start(callback: CallbackQuery):
-    if not is_owner(callback.from_user.id):
-        await callback.answer("❌ Только владелец!", show_alert=True)
-        return
-
-    admin_states[callback.from_user.id] = "adding_admin"
-
-    await callback.message.answer(
-        "➕ Добавление администратора\n\n"
-        "Введи ID пользователя:\n"
-        "Пример: `123456789`"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_remove")
-async def remove_admin_start(callback: CallbackQuery):
-    if not is_owner(callback.from_user.id):
-        await callback.answer("❌ Только владелец!", show_alert=True)
-        return
-
-    admin_states[callback.from_user.id] = "removing_admin"
-
-    await callback.message.answer(
-        "➖ Удаление администратора\n\n"
-        "Введи ID пользователя:\n"
-        "Пример: `123456789`"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_create_promo")
-async def create_promo_start(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет прав!", show_alert=True)
-        return
-
-    admin_states[callback.from_user.id] = "creating_promo"
-
-    await callback.message.answer(
-        "🎟 Создание промокода\n\n"
-        "Введи данные в формате:\n"
-        "`сумма лимит`\n\n"
-        "Пример: 500 3 - промокод на 500 монет, 3 использования\n\n"
-        "Или:\n"
-        "`сумма лимит КОД` - если хочешь свой код\n"
-        "Пример: `1000 1 WIN2025`",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_give")
-async def give_money_start(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет прав!", show_alert=True)
-        return
-
-    admin_states[callback.from_user.id] = "giving_money"
-
-    await callback.message.answer(
-        "💰 Начисление монет\n\n"
-        "Введи данные в формате:\n"
-        "`user_id сумма`\n\n"
-        "Пример: `123456789 500`"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "admin_list_promos")
-async def list_promos(callback: CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        await callback.answer("❌ Нет прав!", show_alert=True)
-        return
-
-    if not promocodes:
-        await callback.message.answer("📭 Нет активных промокодов")
-        await callback.answer()
-        return
-
-    text = "📋 Список промокодов:\n\n"
-    for code, data in promocodes.items():
-        text += f"• {code}: {data['value']} монет, использовано {data['uses']}/{data['max_uses']}\n"
-
-    await callback.message.answer(text, parse_mode="Markdown")
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "back_to_main")
-async def back_to_main(callback: CallbackQuery):
-    user_id = str(callback.from_user.id)
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 Мини-игра", callback_data="game")],
-        [InlineKeyboardButton(text="🛒 Магазин", callback_data="shop")],
-        [InlineKeyboardButton(text="🎁 Удача", callback_data="luck")],
-        [InlineKeyboardButton(text="📜 Правила", callback_data="rules")],
-        [InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")]
-    ])
-
-    if is_admin(callback.from_user.id):
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin")])
-
-    await callback.message.edit_text(
-        "🏹 Добро пожаловать на турнир WG!\n\n"
-        f"💰 Твой баланс: {users[user_id]['balance']} монет\n\n"
-        "Ивент уже запущен.\n"
-        "Готов испытать удачу?",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-@dp.callback_query(lambda c: c.data == "back_to_main")
-async def back_to_main(callback: CallbackQuery):
-    user_id = str(callback.from_user.id)
-
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎮 Мини-игра", callback_data="game")],
-        [InlineKeyboardButton(text="🛒 Магазин", callback_data="shop")],
-        [InlineKeyboardButton(text="🎁 Удача", callback_data="luck")],
-        [InlineKeyboardButton(text="📜 Правила", callback_data="rules")],
-        [InlineKeyboardButton(text="🎟 Промокод", callback_data="promo")]
-    ])
-
-    if is_admin(callback.from_user.id):
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="⚙️ Админ-панель", callback_data="admin")])
-
-    await callback.message.edit_text(
-        "🏹 Добро пожаловать на турнир WG!\n\n"
-        f"💰 Твой баланс: {users[user_id]['balance']} монет\n\n"
-        "Ивент уже запущен.\n"
-        "Готов испытать удачу?",
-        reply_markup=keyboard
-    )
-    await callback.answer()
-
-
-# ЕДИНСТВЕННЫЙ обработчик всех сообщений от админов
-@dp.message()
-async def handle_admin_actions(message: Message):
-    user_id = message.from_user.id
-
-    # Проверяем, находится ли пользователь в каком-то режиме
-    if user_id not in admin_states:
-        # Если не в режиме админа, проверяем промокоды
-        await handle_promo_logic(message)
-        return
-
-    state = admin_states[user_id]
-
-    # Добавление админа
-    if state == "adding_admin" and is_owner(user_id):
-        try:
-            new_admin_id = int(message.text.strip())
-            if new_admin_id not in admins:
-                admins.append(new_admin_id)
-                save_data(ADMINS_FILE, admins)
-                await message.answer(f"✅ Пользователь {new_admin_id} добавлен в администраторы")
-            else:
-                await message.answer("⚠️ Этот пользователь уже администратор")
-        except ValueError:
-            await message.answer("❌ Ошибка! Введи только цифры ID")
-
-        # Выходим из режима
-        del admin_states[user_id]
-        return
-
-    # Удаление админа
-    if state == "removing_admin" and is_owner(user_id):
-        try:
-            admin_id = int(message.text.strip())
-            if admin_id == OWNER_ID:
-                await message.answer("❌ Нельзя удалить владельца!")
-            elif admin_id in admins:
-                admins.remove(admin_id)
-                save_data(ADMINS_FILE, admins)
-                await message.answer(f"✅ Администратор {admin_id} удалён")
-            else:
-                await message.answer("⚠️ Этот пользователь не является администратором")
-        except ValueError:
-            await message.answer("❌ Ошибка! Введи только цифры ID")
-
-        del admin_states[user_id]
-        return
-
-    # Создание промокода
-    if state == "creating_promo" and is_admin(user_id):
-        text = message.text.strip()
-        parts = text.split()
-
-        try:
-            if len(parts) == 2:
-                value = int(parts[0])
-                max_uses = int(parts[1])
-                code = generate_promo_code()
-            elif len(parts) == 3:
-                value = int(parts[0])
-                max_uses = int(parts[1])
-                code = parts[2].upper()
-            else:
-                await message.answer("❌ Неправильный формат! Используй: сумма лимит или сумма лимит КОД")
-                del admin_states[user_id]
-                return
-
-            if code in promocodes:
-                await message.answer(f"❌ Промокод {code} уже существует!")
-                del admin_states[user_id]
-                return
-
-            promocodes[code] = {
-    "value": value,
-    "uses": 0,
-    "max_uses": max_uses,
-    "created_by": user_id
-}
-            save_data(PROMOCODES_FILE, promocodes)
-
-            await message.answer(
-    f"✅ Промокод создан!\n\n"
-    f"📌 Код: `{code}`\n"
-    f"💰 Сумма: {value} монет\n"
-    f"👥 Лимит: {max_uses} использований\n\n"
-    f"Отправь этот код игрокам!",
-    parse_mode="Markdown"
-)
-        except (ValueError, IndexError):
-            await message.answer("❌ Ошибка! Введи число и лимит правильно")
-
-    del admin_states[user_id]
-
-
-# ЕДИНСТВЕННЫЙ обработчик всех сообщений от админов
-@dp.message()
-async def handle_admin_actions(message: Message):
-    user_id = message.from_user.id
-
-    # Проверяем, находится ли пользователь в каком-то режиме
-    if user_id not in admin_states:
-        # Если не в режиме админа, проверяем промокоды
-        await handle_promo_logic(message)
-        return
-
-    state = admin_states[user_id]
-
-    # Добавление админа
-    if state == "adding_admin" and is_owner(user_id):
-        try:
-            new_admin_id = int(message.text.strip())
-            if new_admin_id not in admins:
-                admins.append(new_admin_id)
-                save_data(ADMINS_FILE, admins)
-                await message.answer(f"✅ Пользователь {new_admin_id} добавлен в администраторы")
-            else:
-                await message.answer("⚠️ Этот пользователь уже администратор")
-        except ValueError:
-            await message.answer("❌ Ошибка! Введи только цифры ID")
-
-        # Выходим из режима
-        del admin_states[user_id]
-        return
-
-    # Удаление админа
-    if state == "removing_admin" and is_owner(user_id):
-        try:
-            admin_id = int(message.text.strip())
-            if admin_id == OWNER_ID:
-                await message.answer("❌ Нельзя удалить владельца!")
-            elif admin_id in admins:
-                admins.remove(admin_id)
-                save_data(ADMINS_FILE, admins)
-                await message.answer(f"✅ Администратор {admin_id} удалён")
-            else:
-                await message.answer("⚠️ Этот пользователь не является администратором")
-        except ValueError:
-            await message.answer("❌ Ошибка! Введи только цифры ID")
-
-        del admin_states[user_id]
-        return
-
-    # Создание промокода
-    if state == "creating_promo" and is_admin(user_id):
-        text = message.text.strip()
-        parts = text.split()
-
-        try:
-            if len(parts) == 2:
-                value = int(parts[0])
-                max_uses = int(parts[1])
-                code = generate_promo_code()
-            elif len(parts) == 3:
-                value = int(parts[0])
-                max_uses = int(parts[1])
-                code = parts[2].upper()
-            else:
-                await message.answer("❌ Неправильный формат! Используй: сумма лимит или сумма лимит КОД")
-                del admin_states[user_id]
-                return
-
-            if code in promocodes:
-                await message.answer(f"❌ Промокод {code} уже существует!")
-                del admin_states[user_id]
-                return
-
-            promocodes[code] = {
-                "value": value,
-                "uses": 0,
-                "max_uses": max_uses,
-                "created_by": user_id
-            }
-            save_data(PROMOCODES_FILE, promocodes)
-
-            await message.answer(
-                f"✅ Промокод создан!\n\n"
-                f"📌 Код: `{code}`\n"
-                f"💰 Сумма: {value} монет\n"
-                f"👥 Лимит: {max_uses} использований\n\n"
-                f"Отправь этот код игрокам!",
-                parse_mode="Markdown"
-            )
-        except (ValueError, IndexError):
-            await message.answer("❌ Ошибка! Введи число и лимит правильно")
-
-        del admin_states[user_id]
-        return
-
-    # Начисление монет
-    if state == "giving_money" and is_admin(user_id):
-        parts = message.text.strip().split()
-
-        try:
-            if len(parts) == 2:
-                target_id = str(parts[0])
-                amount = int(parts[1])
-
-                if target_id not in users:
-                    users[target_id] = {"balance": 0, "last_luck": None}
-
-                users[target_id]["balance"] += amount
-                save_data(USERS_FILE, users)
-
-                await message.answer(f"✅ Начислено {amount} монет пользователю {target_id}")
-
-                try:
-                    await bot.send_message(
-                        int(target_id),
-                        f"💰 Тебе начислено {amount} монет!\n"
-                        f"Текущий баланс: {users[target_id]['balance']}"
-                    )
-                except:
-                    await message.answer("⚠️ Не удалось уведомить пользователя")
-            else:
-                await message.answer("❌ Используй формат: user_id сумма")
-        except (ValueError, IndexError):
-            await message.answer("❌ Ошибка! Введи ID и сумму правильно")
-
-        del admin_states[user_id]
-        return
-
-
-# Функция для обработки промокодов
 async def handle_promo_logic(message: Message):
-    if message.text.startswith('/'):
-        return
+    # не трогаем команды
+    if not message.text or message.text.startswith("/"):
+        return
 
-    code = message.text.upper()
-    user_id = str(message.from_user.id)
+    code = message.text.strip().upper()
+    user_id = str(message.from_user.id)
+    ensure_user(user_id)
 
-    if code in promocodes:
-        promo = promocodes[code]
+    if code not in promocodes:
+        return
 
-        if promo["uses"] >= promo["max_uses"]:
-            await message.answer("❌ Этот промокод уже использован максимальное количество раз!")
-            return
+    promo = promocodes[code]
+    if promo["uses"] >= promo["max_uses"]:
+        await message.answer("❌ Этот промокод уже использован максимальное количество раз!")
+        return
 
-        users[user_id]["balance"] += promo["value"]
-        promo["uses"] += 1
+    users[user_id]["balance"] += promo["value"]
+    promo["uses"] += 1
 
-        save_data(USERS_FILE, users)
-        save_data(PROMOCODES_FILE, promocodes)
+    save_data(USERS_FILE, users)
+    save_data(PROMOCODES_FILE, promocodes)
 
-        await message.answer(
-            f"✅ Промокод активирован!\n"
-            f"💰 Ты получил {promo['value']} монет\n"
-            f"Текущий баланс: {users[user_id]['balance']}"
-        )
+    await message.answer(
+        f"✅ Промокод активирован!\n"
+        f"💰 Ты получил {promo['value']} монет\n"
+        f"Текущий баланс: {users[user_id]['balance']}"
+    )
 
-        try:
-            await bot.send_message(
-                promo["created_by"],
-                f"🎟 Промокод {code} активирован!\n"
-                f"Пользователь: {message.from_user.full_name} (ID: {user_id})\n"
-                f"Осталось использований: {promo['max_uses'] - promo['uses']}"
-            )
-        except:
-            pass
+    # уведомляем создателя промо (если возможно)
+    try:
+        await bot.send_message(
+            int(promo["created_by"]),
+            f"🎟 Промокод {code} активирован!\n"
+            f"Пользователь: {message.from_user.full_name} (ID: {user_id})\n"
+            f"Осталось использований: {promo['max_uses'] - promo['uses']}"
+        )
+    except Exception:
+        pass
 
+# -------------------- ADMIN PANEL --------------------
+@dp.callback_query(F.data == "admin")
+async def admin_panel(callback: CallbackQuery):
+    uid = callback.from_user.id
+    if not is_admin(uid):
+        await callback.answer("❌ У тебя нет прав администратора!", show_alert=True)
+        return
 
-@dp.callback_query(lambda c: c.data == "game")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎟 Создать промокод", callback_data="admin_create_promo")],
+        [InlineKeyboardButton(text="📋 Список промокодов", callback_data="admin_list_promos")],
+        [InlineKeyboardButton(text="💰 Начислить монеты", callback_data="admin_give")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")],
+    ])
+
+    if is_owner(uid):
+        kb.inline_keyboard.insert(0, [
+            InlineKeyboardButton(text="➕ Добавить админа", callback_data="admin_add"),
+            InlineKeyboardButton(text="➖ Удалить админа", callback_data="admin_remove"),
+        ])
+
+    await callback.message.edit_text("⚙️ Админ-панель\n\nВыбери действие:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_add")
+async def add_admin_start(callback: CallbackQuery):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Только владелец!", show_alert=True)
+        return
+    admin_states[callback.from_user.id] = "adding_admin"
+    await callback.message.answer("➕ Добавление администратора\n\nВведи ID пользователя (только цифры):")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_remove")
+async def remove_admin_start(callback: CallbackQuery):
+    if not is_owner(callback.from_user.id):
+        await callback.answer("❌ Только владелец!", show_alert=True)
+        return
+    admin_states[callback.from_user.id] = "removing_admin"
+    await callback.message.answer("➖ Удаление администратора\n\nВведи ID пользователя (только цифры):")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_create_promo")
+async def create_promo_start(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет прав!", show_alert=True)
+        return
+    admin_states[callback.from_user.id] = "creating_promo"
+    await callback.message.answer(
+        "🎟 Создание промокода\n\n"
+        "Формат:\n"
+        "`сумма лимит`\n"
+        "Пример: `500 3`\n\n"
+        "Или свой код:\n"
+        "`сумма лимит КОД`\n"
+        "Пример: `1000 1 WIN2025`",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_give")
+async def give_money_start(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет прав!", show_alert=True)
+        return
+    admin_states[callback.from_user.id] = "giving_money"
+    await callback.message.answer("💰 Начисление монет\n\nФормат: `user_id сумма`\nПример: `123456789 500`", parse_mode="Markdown")
+    await callback.answer()
+
+@dp.callback_query(F.data == "admin_list_promos")
+async def list_promos(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        await callback.answer("❌ Нет прав!", show_alert=True)
+        return
+
+    if not promocodes:
+        await callback.message.answer("📭 Нет активных промокодов")
+        await callback.answer()
+        return
+
+    text = "📋 Список промокодов:\n\n"
+    for code, data in promocodes.items():
+        text += f"• {code}: {data['value']} монет, использовано {data['uses']}/{data['max_uses']}\n"
+
+    await callback.message.answer(text)
+    await callback.answer()
+
+@dp.callback_query(F.data == "back_to_main")
+async def back_to_main(callback: CallbackQuery):
+    user_id = str(callback.from_user.id)
+    ensure_user(user_id)
+
+    await callback.message.edit_text(
+        "🏹 Добро пожаловать на турнир WG!\n\n"
+        f"💰 Твой баланс: {users[user_id]['balance']} монет\n\n"
+        "Ивент уже запущен.\n"
+        "Готов испытать удачу?",
+        reply_markup=main_keyboard(callback.from_user.id),
+    )
+    await callback.answer()
+
+# -------------------- NON-ADMIN / ADMIN INPUT HANDLER (ONE!) --------------------
+@dp.message()
+async def handle_admin_actions(message: Message):
+    uid = message.from_user.id
+
+    # если админ НЕ в режиме — просто проверяем промокоды
+    if uid not in admin_states:
+        await handle_promo_logic(message)
+        return
+
+    state = admin_states[uid]
+
+    # ➕ добавить админа
+    if state == "adding_admin" and is_owner(uid):
+        try:
+            new_admin_id = int(message.text.strip())
+            if new_admin_id not in admins:
+                admins.append(new_admin_id)
+                save_data(ADMINS_FILE, admins)
+                await message.answer(f"✅ Пользователь {new_admin_id} добавлен в администраторы")
+            else:
+                await message.answer("⚠️ Этот пользователь уже администратор")
+        except ValueError:
+            await message.answer("❌ Ошибка! Введи только цифры ID")
+        admin_states.pop(uid, None)
+        return
+
+    # ➖ удалить админа
+    if state == "removing_admin" and is_owner(uid):
+        try:
+            admin_id = int(message.text.strip())
+            if admin_id == OWNER_ID:
+                await message.answer("❌ Нельзя удалить владельца!")
+            elif admin_id in admins:
+                admins.remove(admin_id)
+                save_data(ADMINS_FILE, admins)
+                await message.answer(f"✅ Администратор {admin_id} удалён")
+            else:
+                await message.answer("⚠️ Этот пользователь не является администратором")
+        except ValueError:
+            await message.answer("❌ Ошибка! Введи только цифры ID")
+        admin_states.pop(uid, None)
+        return
+
+    # 🎟 создать промокод
+    if state == "creating_promo" and is_admin(uid):
+        parts = message.text.strip().split()
+        try:
+            if len(parts) == 2:
+                value = int(parts[0])
+                max_uses = int(parts[1])
+                code = generate_promo_code()
+            elif len(parts) == 3:
+                value = int(parts[0])
+                max_uses = int(parts[1])
+                code = parts[2].upper()
+            else:
+                await message.answer("❌ Неправильный формат! Используй: сумма лимит или сумма лимит КОД")
+                admin_states.pop(uid, None)
+                return
+
+            if code in promocodes:
+                await message.answer(f"❌ Промокод {code} уже существует!")
+                admin_states.pop(uid, None)
+                return
+
+            promocodes[code] = {
+                "value": value,
+                "uses": 0,
+                "max_uses": max_uses,
+                "created_by": uid,
+            }
+            save_data(PROMOCODES_FILE, promocodes)
+
+            await message.answer(
+                f"✅ Промокод создан!\n\n"
+                f"📌 Код: `{code}`\n"
+                f"💰 Сумма: {value} монет\n"
+                f"👥 Лимит: {max_uses} использований\n\n"
+                f"Отправь этот код игрокам!",
+                parse_mode="Markdown"
+            )
+        except Exception:
+            await message.answer("❌ Ошибка! Введи число и лимит правильно")
+
+        admin_states.pop(uid, None)
+        return
+
+    # 💰 начислить монеты
+    if state == "giving_money" and is_admin(uid):
+        parts = message.text.strip().split()
+        try:
+            if len(parts) != 2:
+                await message.answer("❌ Используй формат: user_id сумма")
+                admin_states.pop(uid, None)
+                return
+
+            target_id = str(parts[0])
+            amount = int(parts[1])
+
+            ensure_user(target_id)
+            users[target_id]["balance"] += amount
+            save_data(USERS_FILE, users)
+
+            await message.answer(f"✅ Начислено {amount} монет пользователю {target_id}")
+
+            try:
+                await bot.send_message(
+                    int(target_id),
+                    f"💰 Тебе начислено {amount} монет!\nТекущий баланс: {users[target_id]['balance']}"
+                )
+            except Exception:
+                await message.answer("⚠️ Не удалось уведомить пользователя")
+        except Exception:
+            await message.answer("❌ Ошибка! Введи ID и сумму правильно")
+
+        admin_states.pop(uid, None)
+        return
+
+    # если состояние непонятное — сбрасываем
+    admin_states.pop(uid, None)
+
+# -------------------- SIMPLE CALLBACKS --------------------
+@dp.callback_query(F.data == "game")
 async def game(callback: CallbackQuery):
-    await callback.message.answer("🎮 Мини-игра пока в разработке!")
-    await callback.answer()
+    await callback.message.answer("🎮 Мини-игра пока в разработке!")
+    await callback.answer()
 
-
-@dp.callback_query(lambda c: c.data == "shop")
+@dp.callback_query(F.data == "shop")
 async def shop(callback: CallbackQuery):
-    await callback.message.answer("🛒 Магазин пока в разработке!")
-    await callback.answer()
+    await callback.message.answer("🛒 Магазин пока в разработке!")
+    await callback.answer()
 
-
-@dp.callback_query(lambda c: c.data == "rules")
+@dp.callback_query(F.data == "rules")
 async def rules(callback: CallbackQuery):
-    await callback.message.answer(
-        "📜 Правила ивента:\n\n"
-        "1. Каждый день можно получить удачу (0-1000 монет)\n"
-        "2. Промокоды дают дополнительные монеты\n"
-        "3. В магазине можно купить разные бонусы\n"
-        "4. Следи за обновлениями!"
-    )
+    await callback.message.answer(
+        "📜 Правила ивента:\n\n"
+        "1. Каждый день можно получить удачу (0-1000 монет)\n"
+        "2. Промокоды дают дополнительные монеты\n"
+        "3. В магазине можно купить разные бонусы\n"
+        "4. Следи за обновлениями!"
+    )
+    await callback.answer()
 
-
-    await callback.answer()
-
-
+# -------------------- RUN --------------------
 async def main():
-    await dp.start_polling(bot)
+    logging.info("BOT STARTING...")
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main())
